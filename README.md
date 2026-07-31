@@ -62,6 +62,17 @@ Availability is re-checked at call time, never assumed — another process holdi
 the card makes the device context fail with OOM, and the CPU kernel then runs.
 `MOJO_PANEL_DISABLE_GPU=1` forces that path.
 
+## Known limits
+
+`xs_rank` is O(P^2) per row — every entity compared against every other. That is
+the right shape for the GPU kernel (it is why rank has enough arithmetic intensity
+to pay for the transfer) but the wrong algorithm on the CPU, where pandas'
+sort-based rank is O(P log P) and wins at small P. Measured: at 1272x176 pandas
+takes 34 ms and this takes ~55 ms; the kernel only pulls ahead from about
+16384x512 (1.9x) upward, where pandas' per-row Python overhead dominates. A
+sort-based CPU path is the obvious next change, and until it lands, prefer pandas
+for narrow panels.
+
 ## NumPy fallback
 
 Without the Mojo toolchain every function falls back to an equivalent NumPy/pandas
