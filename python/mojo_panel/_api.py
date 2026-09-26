@@ -11,6 +11,7 @@ from __future__ import annotations
 import ctypes
 import os
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -30,7 +31,7 @@ _SIGNATURES = {
     "mp_xs_zscore": ([I, I, I, I, I, F, I], I),
     "mp_xs_demean": ([I] * 6, I),
     "mp_xs_rank": ([I] * 7, I),
-    "mp_xs_topk": ([I] * 6, I),
+    "mp_xs_rank_rows": ([I] * 8, I),
     "mp_rolling_beta": ([I, I, I, I, I, I, I, F, I], I),
 }
 
@@ -51,6 +52,7 @@ _GPU_SIGNATURES = {
 GPU_MIN_RANK_WORK = 4_000_000     # rows * cols^2
 GPU_MIN_LINEAR_CELLS = 8_000_000  # rows * cols
 WORKERS = int(os.environ.get("MOJO_PANEL_WORKERS", str(min(16, (os.cpu_count() or 8) - 2))))
+RANK_PARALLEL_WORK = 2_000_000  # rows * cols^2
 
 
 def _build() -> str:
@@ -298,7 +300,25 @@ def xs_rank(x, valid=None, signed: bool = False) -> np.ndarray:
     lib = _native()
     if lib is None:
         return _ref_xs(a, v.astype(bool), "rank", signed=signed)
-    lib.mp_xs_rank(_addr(a), _addr(v), _addr(o), a.shape[0], a.shape[1], int(signed), WORKERS)
+    rows, cols = a.shape
+    if WORKERS > 1 and rows * cols * cols >= RANK_PARALLEL_WORK:
+        # Each bar is an independent P^2 sweep; splitting them across cores is
+        # worth it only once there is real work per bar. Measured 6.7x-7.9x on
+        # 16 workers at T=20k-50k, P=100-300.
+        workers = min(WORKERS, rows)
+        edges = [rows * i // workers for i in range(workers + 1)]
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(
+                pool.map(
+                    lambda band: lib.mp_xs_rank_rows(
+                        _addr(a), _addr(v), _addr(o), rows, cols, int(signed),
+                        band[0], band[1],
+                    ),
+                    zip(edges, edges[1:]),
+                )
+            )
+    else:
+        lib.mp_xs_rank(_addr(a), _addr(v), _addr(o), rows, cols, int(signed), WORKERS)
     return o
 
 

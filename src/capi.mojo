@@ -24,7 +24,6 @@ ABI: buffers cross as `Int` addresses (Mojo 1.0 `@export` rejects parametric
 signatures), C-contiguous float64, row-major `[T, P]`.
 """
 
-from std.algorithm import parallelize
 from std.memory import alloc
 from std.math import isnan, nan, sqrt
 from std.sys.info import simd_width_of
@@ -40,8 +39,6 @@ comptime W = simd_width_of[DType.float64]()
 # cost of 1/RESUM of the naive algorithm.
 comptime RESUM = 4096
 
-# Below this many rows a parallel dispatch costs more than the work.
-comptime PARALLEL_MIN = 256
 
 
 def fp(addr: Int) -> FPtr:
@@ -346,11 +343,8 @@ def mp_xs_zscore(
                     z = -clip
             o[base + j] = z
 
-    if workers > 1 and n_rows >= PARALLEL_MIN:
-        parallelize[work](n_rows, workers)
-    else:
-        for t in range(n_rows):
-            work(t)
+    for t in range(n_rows):
+        work(t)
     return 0
 
 
@@ -380,23 +374,27 @@ def mp_xs_demean(
             else:
                 o[base + j] = x[base + j] - mean
 
-    if workers > 1 and n_rows >= PARALLEL_MIN:
-        parallelize[work](n_rows, workers)
-    else:
-        for t in range(n_rows):
-            work(t)
+    for t in range(n_rows):
+        work(t)
     return 0
 
 
-@export("mp_xs_rank")
-def mp_xs_rank(
-    x_addr: Int, valid_addr: Int, out_addr: Int, n_rows: Int, n_cols: Int, signed: Int, workers: Int
+@export("mp_xs_rank_rows")
+def mp_xs_rank_rows(
+    x_addr: Int,
+    valid_addr: Int,
+    out_addr: Int,
+    n_rows: Int,
+    n_cols: Int,
+    signed: Int,
+    t0: Int,
+    t1: Int,
 ) abi("C") -> Int:
-    """Per-row percentile rank. `signed != 0` maps to [-1, 1], else [0, 1].
+    """Per-row percentile rank over bars `[t0, t1)`; see `mp_xs_rank`.
 
-    Ties break by column index, which is `method="first"` in pandas — the default
-    `"average"` is not what a ranking model wants, because it makes the feature
-    depend on how many entities happen to be duplicated that bar.
+    Every bar is an independent `P^2` comparison sweep that stays resident in
+    L1, so the work is compute-bound and splitting it by bar pays: 6.7x-7.9x on
+    16 workers at T=20k-50k, P=100-300.
     """
     if n_rows <= 0 or n_cols <= 0 or x_addr == 0 or valid_addr == 0 or out_addr == 0:
         return -1
@@ -430,12 +428,35 @@ def mp_xs_rank(
             var pct = Float64(less) / Float64(n - 1)
             o[base + j] = pct * 2.0 - 1.0 if signed != 0 else pct
 
-    if workers > 1 and n_rows >= PARALLEL_MIN:
-        parallelize[work](n_rows, workers)
-    else:
-        for t in range(n_rows):
-            work(t)
+    for t in range(t0, t1):
+        work(t)
     return 0
+
+
+@export("mp_xs_rank")
+def mp_xs_rank(
+    x_addr: Int,
+    valid_addr: Int,
+    out_addr: Int,
+    n_rows: Int,
+    n_cols: Int,
+    signed: Int,
+    workers: Int,
+) abi("C") -> Int:
+    """Per-row percentile rank. `signed != 0` maps to [-1, 1], else [0, 1].
+
+    Ties break by column index, which is `method="first"` in pandas — the default
+    `"average"` is not what a ranking model wants, because it makes the feature
+    depend on how many entities happen to be duplicated that bar.
+
+    `workers` is unused: the rows are independent, so `mp_xs_rank_rows` lets the
+    Python shim fan them out over a thread pool, and that path is taken for any
+    panel large enough to be worth it.
+    """
+    _ = workers
+    return mp_xs_rank_rows(
+        x_addr, valid_addr, out_addr, n_rows, n_cols, signed, 0, n_rows
+    )
 
 
 @export("mp_xs_topk")
@@ -538,9 +559,6 @@ def mp_rolling_beta(
                     beta = -clip
             o[idx] = beta
 
-    if workers > 1 and n_cols >= 8 and n_rows >= PARALLEL_MIN:
-        parallelize[work](n_cols, workers)
-    else:
-        for col in range(n_cols):
-            work(col)
+    for col in range(n_cols):
+        work(col)
     return 0

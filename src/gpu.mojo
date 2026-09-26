@@ -16,9 +16,9 @@ the `P^2` comparisons of a rank read from shared rather than global, and z-score
 does a tree reduction instead of an atomic storm.
 """
 
-from std.gpu import barrier, block_idx, thread_idx
-from std.gpu.host import DeviceContext
-from std.gpu.memory import AddressSpace
+from max.gpu import barrier, block_idx, thread_idx
+from max.gpu.host import DeviceContext
+from max.gpu.memory import AddressSpace
 from std.math import isnan, nan, sqrt
 from std.memory import stack_allocation
 
@@ -48,16 +48,16 @@ def xs_rank_kernel(
     x: UnsafePointer[Float64, AnyOrigin[mut=True]],
     valid: UnsafePointer[Int64, AnyOrigin[mut=True]],
     dst: UnsafePointer[Float64, AnyOrigin[mut=True]],
-    n_rows: Int,
-    n_cols: Int,
-    signed: Int,
+    n_rows: Int32,
+    n_cols: Int32,
+    signed: Int32,
 ):
-    var t = Int(block_idx.x)
+    var t = Int32(block_idx.x)
     if t >= n_rows:
         return
     var row = stack_allocation[MAX_COLS, Float64, address_space = AddressSpace.SHARED]()
     var base = t * n_cols
-    var tx = Int(thread_idx.x)
+    var tx = Int32(thread_idx.x)
 
     # Stage the row once; every comparison below then reads shared memory.
     var j = tx
@@ -66,10 +66,12 @@ def xs_rank_kernel(
         j += BLOCK
     barrier()
 
-    var count = 0
-    for k in range(n_cols):
+    var count = Int32(0)
+    var k = Int32(0)
+    while k < n_cols:
         if not isnan(row[k]):
             count += 1
+        k += 1
 
     j = tx
     while j < n_cols:
@@ -77,13 +79,13 @@ def xs_rank_kernel(
             dst[base + j] = NAN
         else:
             var v = row[j]
-            var less = 0
-            for k in range(n_cols):
+            var less = Int32(0)
+            var k = Int32(0)
+            while k < n_cols:
                 var u = row[k]
-                if isnan(u):
-                    continue
-                if u < v or (u == v and k < j):
+                if not isnan(u) and (u < v or (u == v and k < j)):
                     less += 1
+                k += 1
             var pct = Float64(less) / Float64(count - 1)
             dst[base + j] = pct * 2.0 - 1.0 if signed != 0 else pct
         j += BLOCK
@@ -93,18 +95,18 @@ def xs_zscore_kernel(
     x: UnsafePointer[Float64, AnyOrigin[mut=True]],
     valid: UnsafePointer[Int64, AnyOrigin[mut=True]],
     dst: UnsafePointer[Float64, AnyOrigin[mut=True]],
-    n_rows: Int,
-    n_cols: Int,
+    n_rows: Int32,
+    n_cols: Int32,
     clip: Float64,
 ):
-    var t = Int(block_idx.x)
+    var t = Int32(block_idx.x)
     if t >= n_rows:
         return
     var ssum = stack_allocation[BLOCK, Float64, address_space = AddressSpace.SHARED]()
     var ssq = stack_allocation[BLOCK, Float64, address_space = AddressSpace.SHARED]()
     var scnt = stack_allocation[BLOCK, Float64, address_space = AddressSpace.SHARED]()
     var base = t * n_cols
-    var tx = Int(thread_idx.x)
+    var tx = Int32(thread_idx.x)
 
     var total = 0.0
     var sq = 0.0
@@ -123,7 +125,7 @@ def xs_zscore_kernel(
     scnt[tx] = cnt
     barrier()
 
-    var stride = BLOCK // 2
+    var stride = Int32(BLOCK // 2)
     while stride > 0:
         if tx < stride:
             ssum[tx] += ssum[tx + stride]
@@ -187,7 +189,8 @@ def mp_gpu_xs_rank(
         ctx.enqueue_copy(dx, fp(x_addr))
         ctx.enqueue_copy(dv, ip(valid_addr))
         ctx.enqueue_function[xs_rank_kernel](
-            dx, dv, dout, n_rows, n_cols, signed, grid_dim=n_rows, block_dim=BLOCK
+            dx, dv, dout, Int32(n_rows), Int32(n_cols), Int32(signed),
+            grid_dim=n_rows, block_dim=BLOCK,
         )
         ctx.enqueue_copy(fp(out_addr), dout)
         ctx.synchronize()
@@ -211,7 +214,8 @@ def mp_gpu_xs_zscore(
         ctx.enqueue_copy(dx, fp(x_addr))
         ctx.enqueue_copy(dv, ip(valid_addr))
         ctx.enqueue_function[xs_zscore_kernel](
-            dx, dv, dout, n_rows, n_cols, clip, grid_dim=n_rows, block_dim=BLOCK
+            dx, dv, dout, Int32(n_rows), Int32(n_cols), clip,
+            grid_dim=n_rows, block_dim=BLOCK,
         )
         ctx.enqueue_copy(fp(out_addr), dout)
         ctx.synchronize()

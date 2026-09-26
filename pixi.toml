@@ -14,7 +14,7 @@ bench = "python bench/bench.py"
 PYTHONPATH = "python"
 
 [dependencies]
-mojo = "==1.0.0b3.dev2026072406"
+mojo = "==1.2.0.dev2026092605"
 max = ">=26.5.0.dev2026072406,<27"
 python = "3.12.*"
 pytest = "*"
